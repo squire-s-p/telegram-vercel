@@ -1,70 +1,66 @@
 export default async function handler(req, res) {
-  // ✅ CORS
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
   const SHEET_URL = process.env.SHEET_URL;
 
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+  const { message, files } = req.body;
 
-  const { message, files, recipient } = req.body;
+  if (!message) return res.status(400).json({ error: "Message is required" });
 
-  // ✅ Отримуємо chat_id з таблиці
-  async function fetchChatIdByRecipient(key) {
+  // 🔍 Отримати всі chat_id з таблиці
+  async function getAllChatIds() {
     try {
       const res = await fetch(SHEET_URL);
       const csv = await res.text();
-      const lines = csv.trim().split("\n").slice(1); // пропустити заголовки
 
-      for (const line of lines) {
-        const [k, id] = line.split(",");
-        if (k.trim() === key.trim()) return id.trim();
-      }
-
-      return null;
+      const lines = csv.trim().split("\n").slice(1); // пропустити заголовок
+      return lines.map(line => line.trim()).filter(Boolean); // всі id
     } catch (err) {
-      console.error("❌ Не вдалося зчитати таблицю:", err);
-      return null;
+      console.error("❌ Помилка зчитування Google Sheets:", err);
+      return [];
     }
   }
 
-  const chatId = await fetchChatIdByRecipient(recipient);
-  if (!chatId) {
-    return res.status(400).json({ error: "❌ Recipient not found in Google Sheet" });
+  const chatIds = await getAllChatIds();
+  if (!chatIds.length) {
+    return res.status(500).json({ error: "❌ Немає жодного chat_id у таблиці" });
   }
 
   try {
-    // ✅ Надсилаємо повідомлення
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: "HTML" }),
-    });
-
-    // ✅ Надсилаємо файли
-    for (const file of files || []) {
-      const buffer = Buffer.from(file.data, "base64");
-      const blob = new Blob([buffer], { type: file.type });
-
-      const formData = new FormData();
-      formData.append("chat_id", chatId);
-      formData.append("document", blob, file.name);
-
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument`, {
+    for (const chatId of chatIds) {
+      // Надсилання повідомлення
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: "HTML" })
       });
+
+      // Надсилання файлів
+      for (const file of files || []) {
+        const buffer = Buffer.from(file.data, "base64");
+        const blob = new Blob([buffer], { type: file.type });
+
+        const formData = new FormData();
+        formData.append("chat_id", chatId);
+        formData.append("document", blob, file.name);
+
+        await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument`, {
+          method: "POST",
+          body: formData
+        });
+      }
     }
 
-    res.status(200).json({ success: true });
+    return res.status(200).json({ success: true });
   } catch (err) {
-    console.error("❌ Telegram error:", err);
-    res.status(500).json({ success: false, error: err.message });
+    console.error("❌ Telegram API error:", err);
+    return res.status(500).json({ error: err.message });
   }
 }
